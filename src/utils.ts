@@ -82,3 +82,25 @@ export function scoreAttempt(sentenceAttempts: SentenceAttempt[]): number {
   const correct = totals.filter((token) => token.correct).length;
   return Math.max(0, Math.round((correct / totals.length) * 100));
 }
+
+/** 本地时区的日期键，避免 toISOString 的 UTC 偏移把"当天"算错 */
+export function localDateKey(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function addDaysKey(baseKey: string, days: number): string {
+  const [year, month, day] = baseKey.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return localDateKey(date);
+}
+
+export function daysUntil(dateKey: string, todayKey: string = localDateKey()): number {
+  const [y1, m1, d1] = dateKey.split('-').map(Number);
+  const [y2, m2, d2] = todayKey.split('-').map(Number);
+  const ms = new Date(y1, m1 - 1, d1).getTime() - new Date(y2, m2 - 1, d2).getTime();
+  return Math.round(ms / 86_400_000);
+}

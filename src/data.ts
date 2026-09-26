@@ -1,4 +1,5 @@
 import type { Course, PersistedState } from './types';
+import { localDateKey } from './utils';
 
 export const demoCourses: Course[] = [
   {
@@ -64,7 +65,9 @@ export const demoCourses: Course[] = [
   }
 ];
 
-export const createInitialState = (): PersistedState => ({
+export const createInitialState = (): PersistedState => {
+  const today = localDateKey();
+  return {
   schemaVersion: 1,
   courses: structuredClone(demoCourses),
   attempts: [
@@ -74,14 +77,14 @@ export const createInitialState = (): PersistedState => ({
       lessonTitle: '办理值机',
       courseTitle: '日常英语 · 机场与出行',
       submittedAt: '2026-09-24T10:20:00.000Z',
-      score: 84,
+      score: 83,
       teacherFeedback: '连读细节明显进步。注意 bags are 的词尾衔接，再听一遍第二句。',
       sentenceAttempts: [
         {
           sentenceId: 'airport-01-s1',
           source: 'I would like to check in for my flight to London.',
-          answer: 'I would like to check in for my flight to London',
-          score: 94,
+          answer: 'I would like to check in for my fly to London',
+          score: 83,
           tokens: [
             { index: 0, expected: 'I', actual: 'I', correct: true, category: 'unclassified', reason: '' },
             { index: 1, expected: 'would', actual: 'would', correct: true, category: 'unclassified', reason: '' },
@@ -91,9 +94,10 @@ export const createInitialState = (): PersistedState => ({
             { index: 5, expected: 'in', actual: 'in', correct: true, category: 'unclassified', reason: '' },
             { index: 6, expected: 'for', actual: 'for', correct: true, category: 'unclassified', reason: '' },
             { index: 7, expected: 'my', actual: 'my', correct: true, category: 'unclassified', reason: '' },
-            { index: 8, expected: 'flight', actual: 'flight', correct: true, category: 'unclassified', reason: '' },
+            { index: 8, expected: 'flight', actual: 'fly', correct: false, category: 'spelling', reason: '' },
             { index: 9, expected: 'to', actual: 'to', correct: true, category: 'unclassified', reason: '' },
-            { index: 10, expected: 'London', actual: 'London', correct: true, category: 'unclassified', reason: '' }
+            { index: 10, expected: 'London', actual: 'London', correct: true, category: 'unclassified', reason: '' },
+            { index: 11, expected: '.', actual: '', correct: false, category: 'punctuation', reason: '' }
           ]
         }
       ]
@@ -101,14 +105,62 @@ export const createInitialState = (): PersistedState => ({
   ],
   progress: {
     'airport-01': {
-      answers: { 'airport-01-s1': 'I would like to check in for my flight to London' },
+      answers: { 'airport-01-s1': 'I would like to check in for my fly to London' },
       activeSentenceId: 'airport-01-s2',
       updatedAt: '2026-09-24T10:10:00.000Z'
     }
   },
+  reviewItems: [
+    {
+      id: 'demo-review-1',
+      attemptId: 'demo-attempt-1',
+      lessonId: 'airport-01',
+      lessonTitle: '办理值机',
+      courseTitle: '日常英语 · 机场与出行',
+      sentenceId: 'airport-01-s1',
+      source: 'I would like to check in for my flight to London.',
+      target: 'flight',
+      targetIndex: 8,
+      studentAnswer: 'fly',
+      category: 'spelling',
+      createdAt: '2026-09-24T10:20:00.000Z',
+      dueAt: today,
+      mastered: false,
+      streak: 0,
+      practiceCount: 0,
+      correctCount: 0,
+      lastPracticedAt: '',
+      masteredAt: '',
+      logs: []
+    },
+    {
+      id: 'demo-review-2',
+      attemptId: 'demo-attempt-1',
+      lessonId: 'airport-01',
+      lessonTitle: '办理值机',
+      courseTitle: '日常英语 · 机场与出行',
+      sentenceId: 'airport-01-s1',
+      source: 'I would like to check in for my flight to London.',
+      target: 'London',
+      targetIndex: 10,
+      studentAnswer: 'londen',
+      category: 'spelling',
+      createdAt: '2026-09-24T10:20:00.000Z',
+      dueAt: today,
+      mastered: false,
+      streak: 1,
+      practiceCount: 1,
+      correctCount: 1,
+      lastPracticedAt: '2026-09-25T09:02:00.000Z',
+      masteredAt: '',
+      logs: [{ at: '2026-09-25T09:02:00.000Z', correct: true }]
+    }
+  ],
+  collectedReviewKeys: ['demo-attempt-1:airport-01-s1:8', 'demo-attempt-1:airport-01-s1:10'],
   activeLessonId: '',
   activeSentenceId: '',
   theme: 'light',
   fontScale: 1,
   role: 'learner'
-});
+  };
+};

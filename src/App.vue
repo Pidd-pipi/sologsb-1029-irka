@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { courseForLesson, exportRecords, lessonById, persist, saveAttempt, setDownloaded, state, updateTokenClassification } from './store';
-import type { ErrorCategory, Lesson, PracticeAttempt, PracticeView } from './types';
-import { compareSentence, scoreAttempt, segmentText } from './utils';
+import { collectReviewItems, courseForLesson, exportRecords, lessonById, persist, recordReviewResult, reviewWordMatches, saveAttempt, setDownloaded, state, updateTokenClassification } from './store';
+import type { ErrorCategory, Lesson, PracticeAttempt, PracticeView, ReviewItem } from './types';
+import { compareSentence, daysUntil, localDateKey, scoreAttempt, segmentText } from './utils';
 
 const view = ref<PracticeView>(state.activeLessonId ? 'practice' : 'library');
 const online = ref(navigator.onLine);
@@ -13,7 +13,17 @@ const segmentStart = ref(0);
 const segmentEnd = ref(1);
 const teacherAttemptId = ref(state.attempts[0]?.id ?? '');
 const teacherDraft = ref(state.attempts[0]?.teacherFeedback ?? '');
+const reviewQueue = ref<string[]>([]);
+const reviewAnswer = ref('');
+const reviewFeedback = ref<{ correct: boolean; target: string } | null>(null);
+const sessionDoneCount = ref(0);
+const sessionMasteredCount = ref(0);
+const sessionUniqueDone = ref(0);
+const sessionItemTotal = ref(0);
+const sessionFinished = ref(false);
 let toastTimer = 0;
+
+const todayKey = ref(localDateKey());
 
 const activeLesson = computed(() => lessonById(state.activeLessonId));
 const activeCourse = computed(() => activeLesson.value ? courseForLesson(activeLesson.value.id) : undefined);
@@ -38,6 +48,15 @@ const resultSentence = computed(() => resultAttempt.value?.sentenceAttempts[sele
 const teacherAttempt = computed(() => state.attempts.find((attempt) => attempt.id === teacherAttemptId.value));
 const totalWords = computed(() => state.attempts.flatMap((attempt) => attempt.sentenceAttempts).flatMap((item) => item.tokens).length);
 const correctedWords = computed(() => state.attempts.flatMap((attempt) => attempt.sentenceAttempts).flatMap((item) => item.tokens).filter((token) => !token.correct && token.category !== 'unclassified').length);
+
+const activeReviewItems = computed(() => state.reviewItems
+  .filter((item) => !item.mastered)
+  .sort((a, b) => a.dueAt.localeCompare(b.dueAt) || a.createdAt.localeCompare(b.createdAt)));
+const dueReviewItems = computed(() => activeReviewItems.value.filter((item) => item.dueAt <= todayKey.value));
+const masteredReviewItems = computed(() => state.reviewItems.filter((item) => item.mastered));
+const remainingPractices = computed(() => activeReviewItems.value.reduce((sum, item) => sum + Math.max(0, 2 - item.streak), 0));
+const currentReviewItem = computed<ReviewItem | undefined>(() => state.reviewItems.find((item) => item.id === reviewQueue.value[0]));
+const lastSubmittedReviewCount = ref(0);
 
 const categoryOptions: Array<{ value: ErrorCategory; label: string }> = [
   { value: 'unclassified', label: '未分类' },
@@ -139,12 +158,14 @@ function submitLesson() {
     teacherFeedback: ''
   };
   saveAttempt(attempt);
+  const added = collectReviewItems(attempt);
+  lastSubmittedReviewCount.value = added.length;
   resultAttemptId.value = attempt.id;
   selectedResultSentence.value = 0;
   syncSegment();
   view.value = 'result';
   persist();
-  notify('已提交，逐词结果已生成');
+  notify(added.length ? `已提交，${added.length} 个错词已收入复习台` : '已提交，逐词结果已生成');
 }
 
 function syncSegment() {
@@ -175,6 +196,116 @@ function replaySegment() {
 function selectResultSentence(index: number) {
   selectedResultSentence.value = index;
   syncSegment();
+}
+
+function openReview() {
+  reviewQueue.value = [];
+  reviewFeedback.value = null;
+  reviewAnswer.value = '';
+  sessionFinished.value = false;
+  view.value = 'review';
+  window.scrollTo({ top: 0 });
+}
+
+/** 当天先练到期内容；按到期日、加入时间排序 */
+function startReview() {
+  const due = dueReviewItems.value;
+  reviewQueue.value = due.map((item) => item.id);
+  reviewAnswer.value = '';
+  reviewFeedback.value = null;
+  sessionDoneCount.value = 0;
+  sessionMasteredCount.value = 0;
+  sessionUniqueDone.value = 0;
+  sessionItemTotal.value = due.length;
+  sessionFinished.value = false;
+  if (!reviewQueue.value.length) {
+    notify('今天没有到期的错词');
+    return;
+  }
+  const first = currentReviewItem.value;
+  if (first) replay(reviewSegmentText(first, 1), 0.74);
+}
+
+function reviewSegmentText(item: ReviewItem, radius = 2): string {
+  const tokens = segmentText(item.source);
+  const start = Math.max(0, item.targetIndex - radius);
+  const end = Math.min(tokens.length - 1, item.targetIndex + radius);
+  return tokens.slice(start, end + 1).map((token) => token.display).join(' ');
+}
+
+function playReviewWord(item: ReviewItem) {
+  replay(item.target, 0.7);
+}
+
+function playReviewFragment(item: ReviewItem) {
+  replay(reviewSegmentText(item, 2), 0.72);
+}
+
+function playReviewSentence(item: ReviewItem) {
+  replay(item.source, 0.82);
+}
+
+/** 句子中除目标词外正常显示，目标词用空格线代替，避免直接看到答案 */
+function maskedSentenceParts(item: ReviewItem): { text: string; blank: boolean }[] {
+  return segmentText(item.source).map((token) => ({
+    text: token.index === item.targetIndex ? '______' : token.display,
+    blank: token.index === item.targetIndex
+  }));
+}
+
+function submitReviewAnswer() {
+  const item = currentReviewItem.value;
+  if (!item || reviewFeedback.value) return;
+  if (!reviewAnswer.value.trim()) {
+    notify('先拼写这个词');
+    return;
+  }
+  const correct = reviewWordMatches(item, reviewAnswer.value);
+  recordReviewResult(item, correct);
+  persist();
+  reviewFeedback.value = { correct, target: item.target };
+  sessionDoneCount.value += 1;
+  if (correct && item.mastered) sessionMasteredCount.value += 1;
+}
+
+function nextReviewCard() {
+  const item = currentReviewItem.value;
+  reviewFeedback.value = null;
+  reviewAnswer.value = '';
+  if (!item) {
+    reviewQueue.value = [];
+    return;
+  }
+  reviewQueue.value = reviewQueue.value.slice(1);
+  if (!item.mastered && item.dueAt <= todayKey.value) {
+    // 只答对一次：排到队尾，今天会话内再练一次；答错的词已顺延到明天，不会回到队列。
+    reviewQueue.value.push(item.id);
+  } else {
+    sessionUniqueDone.value += 1;
+  }
+  const next = currentReviewItem.value;
+  if (next) {
+    replay(reviewSegmentText(next, 1), 0.74);
+  } else if (sessionItemTotal.value > 0) {
+    sessionFinished.value = true;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+}
+
+/** 中途离开：保留已判定的进度，下次进来可接着练剩余到期词 */
+function leaveReviewSession() {
+  reviewQueue.value = [];
+  reviewFeedback.value = null;
+  reviewAnswer.value = '';
+  sessionFinished.value = false;
+}
+
+function reviewDueLabel(item: ReviewItem): string {
+  const delta = daysUntil(item.dueAt, todayKey.value);
+  if (item.mastered) return '已掌握';
+  if (delta <= 0) return delta === 0 ? '今天到期' : `已到期 ${-delta} 天`;
+  if (delta === 1) return '明天到期';
+  return `${delta} 天后到期`;
 }
 
 function saveClassification(attemptId: string, sentenceId: string, tokenIndex: number, category: ErrorCategory, reason: string) {
@@ -269,6 +400,15 @@ onBeforeUnmount(() => {
           <span>{{ online ? '本地优先存储' : '恢复网络后继续保存' }}</span>
         </div>
 
+        <button class="review-entry" @click="openReview">
+          <div class="review-entry-mark">复</div>
+          <div class="review-entry-text">
+            <strong>错词复习台</strong>
+            <span>{{ dueReviewItems.length ? `今天有 ${dueReviewItems.length} 个错词到期` : '今天没有到期错词' }} · 还需练习 {{ remainingPractices }} 次</span>
+          </div>
+          <span class="review-entry-count">{{ activeReviewItems.length }}</span>
+        </button>
+
         <div class="section-head">
           <h3>课程库</h3>
           <div class="segmented">
@@ -352,6 +492,15 @@ onBeforeUnmount(() => {
           <p>{{ resultAttempt.lessonTitle }} · 点击红色词可单独重听，并记录错误原因。</p>
         </section>
 
+        <section v-if="lastSubmittedReviewCount > 0" class="panel review-result-banner">
+          <div class="review-entry-mark">复</div>
+          <div class="review-entry-text">
+            <strong>{{ lastSubmittedReviewCount }} 个错词已收进复习台</strong>
+            <span>与来源句子绑定保存，连续两次答对才算掌握。原成绩与教师反馈不会被复习改动。</span>
+          </div>
+          <var-button type="primary" size="small" @click="openReview">去复习</var-button>
+        </section>
+
         <div class="sentence-picker">
           <button v-for="(attempt, index) in resultAttempt.sentenceAttempts" :key="attempt.sentenceId" class="sentence-dot" :class="{ active: index === selectedResultSentence }" @click="selectResultSentence(index)">{{ index + 1 }}</button>
         </div>
@@ -393,6 +542,104 @@ onBeforeUnmount(() => {
         <section v-if="resultAttempt.teacherFeedback" class="panel"><div class="feedback-card"><strong>教师反馈</strong><p>{{ resultAttempt.teacherFeedback }}</p></div></section>
         <var-button block type="primary" @click="startLesson(activeLesson!)">返回本次课程</var-button>
         <var-button block type="default" variant="outline" style="margin-top: 10px" @click="downloadRecords">导出练习记录</var-button>
+      </div>
+
+      <div v-else-if="view === 'review'" class="page">
+        <header class="topbar">
+          <button class="back-button" aria-label="返回课程库" @click="leaveReviewSession(); view = 'library'">‹</button>
+          <div class="brand"><div class="brand-mark">复</div><div><h1>错词复习台</h1><p>连续两次答对才算掌握</p></div></div>
+          <button class="icon-button" aria-label="导出练习记录" @click="downloadRecords">导出</button>
+        </header>
+
+        <section class="hero review-hero">
+          <h2>今天先练到期的错词</h2>
+          <p>每个错词都和来源句子绑在一起。答错会顺延到明天，原成绩与教师反馈不受影响。</p>
+          <div class="hero-stats">
+            <div class="hero-stat"><strong>{{ dueReviewItems.length }}</strong><span>今日到期</span></div>
+            <div class="hero-stat"><strong>{{ remainingPractices }}</strong><span>剩余练习次数</span></div>
+            <div class="hero-stat"><strong>{{ masteredReviewItems.length }}</strong><span>已掌握</span></div>
+          </div>
+        </section>
+
+        <!-- 进行中的复习会话 -->
+        <section v-if="currentReviewItem" class="panel review-session">
+          <div class="review-session-top">
+            <span class="status-chip">错词 {{ Math.min(sessionUniqueDone + 1, sessionItemTotal) }} / {{ sessionItemTotal }}</span>
+            <span class="review-session-count">本轮还剩 {{ reviewQueue.length - 1 }} 张待判</span>
+          </div>
+
+          <div class="review-context">
+            <p class="review-sentence">
+              <template v-for="(part, pi) in maskedSentenceParts(currentReviewItem)" :key="pi"><span v-if="part.blank" class="review-blank">{{ part.text }}</span><template v-else>{{ part.text }}</template> </template>
+            </p>
+            <p class="review-meta">{{ currentReviewItem.lessonTitle }} · 第 {{ currentReviewItem.targetIndex + 1 }} 个词 · 已练 {{ currentReviewItem.practiceCount }} 次 · 连击 {{ currentReviewItem.streak }}/2</p>
+          </div>
+
+          <div class="review-audio-row">
+            <button class="word-chip wrong" @click="playReviewWord(currentReviewItem)">▶ 目标词</button>
+            <button class="word-chip" @click="playReviewFragment(currentReviewItem)">▶ 原句片段</button>
+            <button class="word-chip" @click="playReviewSentence(currentReviewItem)">▶ 完整原句</button>
+          </div>
+
+          <div class="dictation-label"><strong>补出横线处的单词</strong><span>上次你写的是：{{ currentReviewItem.studentAnswer || '漏写' }}</span></div>
+          <input v-model="reviewAnswer" class="review-input" placeholder="Type the missing word..." :disabled="!!reviewFeedback" @keydown.enter="reviewFeedback ? nextReviewCard() : submitReviewAnswer()">
+
+          <div v-if="reviewFeedback" class="feedback-card" :class="reviewFeedback.correct ? 'is-correct' : 'is-wrong'">
+            <strong>{{ reviewFeedback.correct ? (currentReviewItem.mastered ? '答对两次，已掌握！' : '答对了，再来一次确认') : '答错了，这个词顺延到明天' }}</strong>
+            <p>正确拼写：{{ reviewFeedback.target }}</p>
+          </div>
+
+          <div class="practice-actions" style="grid-template-columns: 1fr">
+            <var-button v-if="!reviewFeedback" block type="primary" @click="submitReviewAnswer">提交拼写</var-button>
+            <var-button v-else block type="primary" @click="nextReviewCard">{{ reviewQueue.length > 1 ? '下一个词' : '结束本轮' }}</var-button>
+          </div>
+        </section>
+
+        <!-- 会话结束小结 -->
+        <section v-if="sessionFinished" class="panel review-summary">
+          <h3>本轮复习完成</h3>
+          <p>共判定 {{ sessionDoneCount }} 次，新掌握 {{ sessionMasteredCount }} 个词。答错的词已重新排到明天，进度已保存。</p>
+          <var-button block type="default" variant="outline" @click="sessionFinished = false">收起小结</var-button>
+        </section>
+
+        <!-- 空闲态：开始入口 -->
+        <section v-else class="panel">
+          <div class="review-start-row">
+            <div><strong>{{ dueReviewItems.length ? `${dueReviewItems.length} 个错词今天到期` : '今天没有到期错词' }}</strong><p>同一句的多个错词各自记录进度，互不影响。</p></div>
+            <var-button type="primary" :disabled="!dueReviewItems.length" @click="startReview">开始今天练习</var-button>
+          </div>
+        </section>
+
+        <div class="section-head"><h3>未掌握的错词</h3><span>{{ activeReviewItems.length }} 个 · 剩余 {{ remainingPractices }} 次练习</span></div>
+        <article v-if="activeReviewItems.length" class="panel review-list">
+          <div v-for="item in activeReviewItems" :key="item.id" class="review-item">
+            <div class="review-item-main">
+              <strong>{{ item.target }}</strong>
+              <p class="review-item-source">{{ item.source }}</p>
+              <p class="review-item-meta">{{ item.lessonTitle }} · 你写成「{{ item.studentAnswer || '漏写' }}」 · 已练 {{ item.practiceCount }} 次 · 连击 {{ item.streak }}/2</p>
+            </div>
+            <div class="review-item-side">
+              <span class="status-chip" :class="{ due: item.dueAt <= todayKey }">{{ reviewDueLabel(item) }}</span>
+              <button class="icon-button" aria-label="播放原句片段" @click="playReviewFragment(item)">▶</button>
+            </div>
+          </div>
+        </article>
+        <div v-else class="empty-state"><strong>没有待掌握的错词</strong>提交听写后，错词会自动收进这里。</div>
+
+        <div v-if="masteredReviewItems.length" class="section-head"><h3>已掌握</h3><span>{{ masteredReviewItems.length }} 个</span></div>
+        <article v-if="masteredReviewItems.length" class="panel review-list">
+          <div v-for="item in masteredReviewItems.slice(0, 20)" :key="item.id" class="review-item is-done">
+            <div class="review-item-main">
+              <strong>{{ item.target }}</strong>
+              <p class="review-item-source">{{ item.source }}</p>
+              <p class="review-item-meta">共练 {{ item.practiceCount }} 次 · 掌握于 {{ formatDate(item.masteredAt) }}</p>
+            </div>
+            <div class="review-item-side">
+              <span class="status-chip done-chip">已掌握</span>
+              <button class="icon-button" aria-label="播放原句片段" @click="playReviewFragment(item)">▶</button>
+            </div>
+          </div>
+        </article>
       </div>
 
       <div v-else-if="view === 'teacher'" class="page">

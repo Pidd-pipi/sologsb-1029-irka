@@ -14,6 +14,14 @@ export const normalizeToken = (token: string): string => token
   .replaceAll('’', "'")
   .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
 
+export const dayKey = (offsetDays = 0): string => {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+};
+
 export function compareSentence(expected: string, answer: string): TokenResult[] {
   const expectedTokens = segmentText(expected);
   const actualTokens = segmentText(answer);
